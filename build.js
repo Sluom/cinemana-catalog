@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-// Cee Full IPTV Static Catalog + Dynamic Seasonal Groups + Meta Builder (Zero TMDB / Zero IMDb)
-// Ported directly from CloudStream CeeProvider endpoints.
+// Cee Full IPTV Static Catalog + Dynamic Seasonal Groups + Categories Meta Builder
 
 const fs = require('fs');
 const path = require('path');
@@ -9,8 +8,8 @@ const path = require('path');
 const BASE = (process.env.CEE_BASE || 'https://cee.buzz').replace(/\/+$/, '');
 const API = BASE + '/api/android';
 const OUT = path.resolve(process.env.OUT || 'docs');
-const PAGES = parseInt(process.env.PAGES, 10) || 10; // Pages per standard catalog
-const GROUP_PAGES = parseInt(process.env.GROUP_PAGES, 10) || 8; // Pages per dynamic/seasonal group
+const PAGES = parseInt(process.env.PAGES, 10) || 10;
+const GROUP_PAGES = parseInt(process.env.GROUP_PAGES, 10) || 4; // للصفحات والمجموعات الفرعية
 const CHUNK = parseInt(process.env.CHUNK, 10) || 100;
 const CONCURRENCY = parseInt(process.env.CONCURRENCY, 10) || 10;
 const NAME_LANG = process.env.NAME_LANG === 'en' ? 'en' : 'ar';
@@ -19,7 +18,6 @@ const PAGE_SIZE = 30;
 const TIMEOUT_MS = 20000;
 const ID_PREFIX = 'cee:';
 
-// Exact sorts from CloudStream CeeProvider mainPageOf
 const SORTS = [
   ['new', 'desc', 'تاريخ الرفع - الأحدث'],
   ['old', 'asc', 'تاريخ الرفع - الأقدم'],
@@ -108,10 +106,10 @@ function loadCache() {
   }
 }
 
-// 1) Fetch standard sorted lists (/video/V/2)
-async function fetchSortedList(kind, sort) {
+// 1) قوائم الفرز الأساسية والتصنيفات
+async function fetchSortedList(kind, sort, categoryId = '', pages = PAGES) {
   const items = [];
-  for (let page = 0; page < PAGES; page++) {
+  for (let page = 0; page < pages; page++) {
     const url =
       API +
       '/video/V/2?videoKind=' +
@@ -121,51 +119,45 @@ async function fetchSortedList(kind, sort) {
       '&pageNumber=' +
       page +
       '&level=0&sortParam=' +
-      sort;
+      sort +
+      (categoryId ? '&categories=' + categoryId : '');
     let list;
     try {
       list = await fetchJson(url);
     } catch (e) {
-      if (page === 0) throw e;
+      if (page === 0 && !categoryId) throw e;
       break;
     }
     if (!Array.isArray(list) || !list.length) break;
     list.forEach((it) => {
       if (it && it.nb) items.push(it);
     });
-    process.stdout.write('\r   pages read: ' + (page + 1) + '  items: ' + items.length + '   ');
+    if (!categoryId) process.stdout.write('\r   pages read: ' + (page + 1) + '  items: ' + items.length + '   ');
   }
-  process.stdout.write('\n');
+  if (!categoryId) process.stdout.write('\n');
   return items;
 }
 
-// 2) Fetch newlyVideosItems (/newlyVideosItems/level/0/offset/12/page/{p}/)
+// 2) أحدث الإضافات
 async function fetchNewlyAdded() {
   const items = [];
   for (let page = 0; page < GROUP_PAGES; page++) {
     const url = API + '/newlyVideosItems/level/0/offset/12/page/' + page + '/';
     let list;
-    try {
-      list = await fetchJson(url);
-    } catch (e) {
-      break;
-    }
+    try { list = await fetchJson(url); } catch (e) { break; }
     if (!Array.isArray(list) || !list.length) break;
-    list.forEach((it) => {
-      if (it && it.nb) items.push(it);
-    });
+    list.forEach((it) => { if (it && it.nb) items.push(it); });
   }
   return items;
 }
 
-// 3) Fetch dynamic seasonal/special groups (/videoGroups/lang/ar/level/0)
+// 3) المجموعات (مارفل، جيمس بوند، المناسبات)
 async function fetchDynamicGroups() {
   try {
-    const groups = await fetchJson(API + '/videoGroups/lang/ar/level/0');
-    return Array.isArray(groups) ? groups.filter((g) => g && g.id && g.title) : [];
-  } catch (e) {
-    return [];
-  }
+    let groups = await fetchJson(API + '/videoGroup/lang/ar/level/0').catch(() => null);
+    if (!groups) groups = await fetchJson(API + '/videoGroups/lang/ar/level/0').catch(() => []);
+    return Array.isArray(groups) ? groups.filter((g) => g && g.id && (g.title || g.ar_title)) : [];
+  } catch (e) { return []; }
 }
 
 async function fetchGroupItems(gid) {
@@ -173,17 +165,19 @@ async function fetchGroupItems(gid) {
   for (let page = 0; page < GROUP_PAGES; page++) {
     const url = API + '/videoListPagination/groupID/' + gid + '/level/0/itemsPerPage/24/page/' + page;
     let list;
-    try {
-      list = await fetchJson(url);
-    } catch (e) {
-      break;
-    }
+    try { list = await fetchJson(url); } catch (e) { break; }
     if (!Array.isArray(list) || !list.length) break;
-    list.forEach((it) => {
-      if (it && it.nb) items.push(it);
-    });
+    list.forEach((it) => { if (it && it.nb) items.push(it); });
   }
   return items;
+}
+
+// 4) التصنيفات (4K، تركي، رعب، انمي)
+async function fetchCategories() {
+  try {
+    const cats = await fetchJson(API + '/videoCategory/lang/ar/level/0').catch(() => []);
+    return Array.isArray(cats) ? cats.filter((c) => c && c.id && (c.title || c.ar_title)) : [];
+  } catch (e) { return []; }
 }
 
 function toPreview(it, type) {
@@ -253,7 +247,7 @@ async function fetchFullMeta(nb, type, fallbackItem) {
 }
 
 async function main() {
-  console.log('Cee Full IPTV Builder (All Sections + Dynamic Seasonal Groups + No TMDB)\n');
+  console.log('Cee Full IPTV Builder (Groups + Categories + Sorted Lists)\n');
 
   const cache = loadCache();
   const lists = [];
@@ -267,30 +261,25 @@ async function main() {
     });
   }
 
-  // A) Newly Added Section (أحدث الإضافات)
-  console.log('Reading Cee: أحدث الإضافات (newlyVideosItems)...');
+  // A) أحدث الإضافات
+  console.log('Reading Cee: أحدث الإضافات...');
   const newly = await fetchNewlyAdded();
   if (newly.length) {
     registerItems(newly, null);
     const newlyMovies = newly.filter((it) => itemType(it, 'movie') === 'movie');
     const newlySeries = newly.filter((it) => itemType(it, 'movie') === 'series');
-    if (newlyMovies.length) {
-      lists.push({ type: 'movie', id: 'cee_newly_movie', name: 'Cee | أحدث الإضافات - أفلام', items: newlyMovies });
-    }
-    if (newlySeries.length) {
-      lists.push({ type: 'series', id: 'cee_newly_series', name: 'Cee | أحدث الإضافات - مسلسلات', items: newlySeries });
-    }
+    if (newlyMovies.length) lists.push({ type: 'movie', id: 'cee_newly_movie', name: 'Cee | أحدث الإضافات - أفلام', items: newlyMovies });
+    if (newlySeries.length) lists.push({ type: 'series', id: 'cee_newly_series', name: 'Cee | أحدث الإضافات - مسلسلات', items: newlySeries });
   }
 
-  // B) Dynamic & Seasonal Groups (باقات رمضان، محرم، المناسبات، والمجموعات المتجددة)
-  console.log('Checking Cee Dynamic & Seasonal Groups (videoGroups)...');
+  // B) المجموعات (مارفل، بوند، 4K، الخ)
+  console.log('Checking Cee Groups (المجموعات)...');
   const groups = await fetchDynamicGroups();
   console.log('   Found ' + groups.length + ' dynamic groups.');
   for (const g of groups) {
     const gid = str(g.id);
-    const gTitle = str(g.title);
+    const gTitle = str(g.title) || str(g.ar_title);
     if (!gid || !gTitle) continue;
-    console.log('   Reading Group [' + gid + ']: ' + gTitle);
     const gItems = await fetchGroupItems(gid);
     if (!gItems.length) continue;
     registerItems(gItems, null);
@@ -298,41 +287,44 @@ async function main() {
     const gMovies = gItems.filter((it) => itemType(it, 'movie') === 'movie');
     const gSeries = gItems.filter((it) => itemType(it, 'movie') === 'series');
 
-    if (gMovies.length) {
-      lists.push({
-        type: 'movie',
-        id: 'cee_group_' + gid + '_movie',
-        name: 'Cee | ' + gTitle + ' (أفلام)',
-        items: gMovies,
-      });
+    if (gMovies.length) lists.push({ type: 'movie', id: 'cee_group_' + gid + '_movie', name: 'Cee | ' + gTitle + ' (أفلام)', items: gMovies });
+    if (gSeries.length) lists.push({ type: 'series', id: 'cee_group_' + gid + '_series', name: 'Cee | ' + gTitle + ' (مسلسلات)', items: gSeries });
+  }
+
+  // C) التصنيفات (تركي، 4K، انمي، الخ)
+  console.log('\nChecking Cee Categories (التصنيفات)...');
+  const categories = await fetchCategories();
+  console.log('   Found ' + categories.length + ' categories.');
+  for (const cat of categories) {
+    const cid = str(cat.id);
+    const cTitle = str(cat.title) || str(cat.ar_title);
+    if (!cid || !cTitle) continue;
+    
+    const mItems = await fetchSortedList(1, 'new', cid, GROUP_PAGES);
+    if (mItems.length) {
+      registerItems(mItems, 'movie');
+      lists.push({ type: 'movie', id: 'cee_cat_' + cid + '_movie', name: 'Cee | ' + cTitle + ' (أفلام)', items: mItems });
     }
-    if (gSeries.length) {
-      lists.push({
-        type: 'series',
-        id: 'cee_group_' + gid + '_series',
-        name: 'Cee | ' + gTitle + ' (مسلسلات)',
-        items: gSeries,
-      });
+    const sItems = await fetchSortedList(2, 'new', cid, GROUP_PAGES);
+    if (sItems.length) {
+      registerItems(sItems, 'series');
+      lists.push({ type: 'series', id: 'cee_cat_' + cid + '_series', name: 'Cee | ' + cTitle + ' (مسلسلات)', items: sItems });
     }
   }
 
-  // C) Standard Sorted Sections (أقسام الأفلام والمسلسلات الثابتة)
+  // D) الأقسام والفلاتر العامة
+  console.log('\nReading Cee: Standard Sorts...');
   for (const k of KINDS) {
     for (const [key, sort, label] of SORTS) {
-      console.log('Reading Cee: ' + k.label + ' - ' + label);
+      console.log('   ' + k.label + ' - ' + label);
       let items;
       try {
         items = await fetchSortedList(k.kind, sort);
       } catch (e) {
-        console.log('\nCould not reach Cee (' + e.message + '). Make sure you are connected inside Iraq.');
+        console.log('\nCould not reach Cee. Make sure you are connected inside Iraq.');
         process.exit(1);
       }
-      lists.push({
-        type: k.type,
-        id: 'cee_' + k.type + '_' + key,
-        name: 'Cee | ' + k.label + ' - ' + label,
-        items,
-      });
+      lists.push({ type: k.type, id: 'cee_' + k.type + '_' + key, name: 'Cee | ' + k.label + ' - ' + label, items });
       registerItems(items, k.type);
     }
   }
@@ -400,14 +392,13 @@ async function main() {
     if (metas.length % CHUNK !== 0) {
       writeJson(path.join(dir, l.id, 'skip=' + metas.length + '.json'), { metas: [] });
     }
-    console.log(l.name + ': ' + metas.length + ' items');
   }
 
   writeJson(path.join(OUT, 'manifest.json'), {
     id: 'community.cee.iptv.catalog',
-    version: '2.1.0',
+    version: '3.0.0',
     name: 'Cee Iraq IPTV Catalog',
-    description: 'كتالوج Cee الشامل مع الأقسام المتجددة والمناسبات (بدون TMDB، يعمل مع بلوغن Cee)',
+    description: 'كتالوج Cee الشامل مع الأقسام المتجددة والتصنيفات والمجموعات (يعمل داخل العراق)',
     resources: ['catalog', 'meta'],
     types: ['movie', 'series'],
     idPrefixes: [ID_PREFIX],
